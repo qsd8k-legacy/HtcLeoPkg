@@ -2,8 +2,7 @@
     //
     Device (SDC2)
     {
-        Name (_HID, "QCOM2466")
-        Name (_CID, "ACPI\QCOM2466")
+        Name (_HID, "HTCL2466")   // own ID: inbox sdbus claims QCOM2466
         Name (_UID, 1)
 
         Method (_CRS, 0x0, NotSerialized) {

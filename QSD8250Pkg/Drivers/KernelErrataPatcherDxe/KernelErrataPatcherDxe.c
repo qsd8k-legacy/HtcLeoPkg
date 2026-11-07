@@ -17,8 +17,12 @@
         TLBIMVAA   c8,c7,3 -> TLBIALL  c8,c7,0   TLBIMVA misses non-global)
         ICIALLUIS  c7,c1,0 -> ICIALLU  c7,c5,0
         BPIALLIS   c7,c1,6 -> BPIALL   c7,c5,6
-  Coherent walk itself works on the Scorpion with TTBR0.S=1, which Windows
-  inherits from the firmware (KiSetFeatureBits keeps TTBR0 & 0x7F).
+  The Scorpion's table walk does NOT see L1 with the attributes Windows runs
+  (TTBR0 & 0x7F = 0x09, measured on the phone; setting S did not help), and
+  with the MMFR3 check gone Windows never cleans its PTEs.  The HAL's mapper
+  (HalpMap / HalpUnmapVirtualAddress) is therefore redirected to stubs that
+  clean the written PTEs to PoC before TLBIALL (real HD2, beacon v18: the
+  silent hang in HAL init is gone).  Mm's own PTE writes are not covered yet.
 
   Copyright (c) 2024, J0SH1X. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -435,15 +439,17 @@ STATIC CONST UINT8  mBeaconMark[] = {
   0x3a,0x3f,0xf3,0xd1,0x00,0x20,0xbf,0xf3,0x4f,0x8f,0x0a,0x18,0x00,0xf5,0x80,0x50,
   0xb0,0xf5,0x80,0x3f,0x08,0xee,0x37,0x2f,0xf7,0xd1,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,
   0x6f,0x8f,0x00,0x9a,0x10,0x06,0x00,0xd4,0x62,0xb6,0x12,0xb0,0xbd,0xe8,0xf0,0x8f,
-  0x2d,0xe9,0xf0,0x41,0xef,0xf3,0x00,0x8c,0x72,0xb6,0x6b,0x46,0x9b,0x0a,0x03,0xf1,
-  0x40,0x43,0x23,0xf0,0x03,0x03,0x1b,0x68,0x9e,0x07,0x2f,0xd5,0x1a,0xb3,0x4f,0xf6,
-  0xfc,0x7e,0x40,0xf2,0xfe,0x76,0x33,0x40,0xc0,0xf2,0x3f,0x0e,0x4f,0xf0,0x40,0x48,
-  0x05,0x46,0x16,0x46,0x0e,0xea,0x95,0x27,0x41,0xea,0x03,0x04,0x01,0xf5,0x80,0x51,
-  0x05,0xf5,0x80,0x55,0x01,0x3e,0x47,0xf8,0x08,0x40,0x07,0xf1,0x40,0x44,0x07,0xee,
-  0x3a,0x4f,0xef,0xd1,0xbf,0xf3,0x4f,0x8f,0x08,0xee,0x37,0x0f,0x00,0xf5,0x80,0x50,
-  0x01,0x3a,0xf9,0xd1,0x01,0xe0,0xbf,0xf3,0x4f,0x8f,0x00,0x20,0x07,0xee,0x15,0x0f,
-  0x07,0xee,0xd5,0x0f,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,0x6f,0x8f,0x5f,0xea,0x0c,0x60,
-  0x00,0xd4,0x62,0xb6,0xbd,0xe8,0xf0,0x81,
+  0x2d,0xe9,0xf0,0x41,0xef,0xf3,0x00,0x8c,0x72,0xb6,0x6b,0x46,0x12,0xee,0x10,0x6f,
+  0xb5,0x07,0x0e,0xd4,0xbf,0xf3,0x4f,0x8f,0x46,0xf0,0x02,0x06,0x02,0xee,0x10,0x6f,
+  0x00,0x26,0xbf,0xf3,0x6f,0x8f,0x08,0xee,0x17,0x6f,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,
+  0x6f,0x8f,0x9b,0x0a,0x03,0xf1,0x40,0x43,0x23,0xf0,0x03,0x03,0x1b,0x68,0x9e,0x07,
+  0x2f,0xd5,0x1a,0xb3,0x4f,0xf6,0xfc,0x7e,0x40,0xf2,0xfe,0x76,0x33,0x40,0xc0,0xf2,
+  0x3f,0x0e,0x4f,0xf0,0x40,0x48,0x05,0x46,0x16,0x46,0x0e,0xea,0x95,0x27,0x41,0xea,
+  0x03,0x04,0x01,0xf5,0x80,0x51,0x05,0xf5,0x80,0x55,0x01,0x3e,0x47,0xf8,0x08,0x40,
+  0x07,0xf1,0x40,0x44,0x07,0xee,0x3a,0x4f,0xef,0xd1,0xbf,0xf3,0x4f,0x8f,0x08,0xee,
+  0x37,0x0f,0x00,0xf5,0x80,0x50,0x01,0x3a,0xf9,0xd1,0x01,0xe0,0xbf,0xf3,0x4f,0x8f,
+  0x00,0x20,0x07,0xee,0x15,0x0f,0x07,0xee,0xd5,0x0f,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,
+  0x6f,0x8f,0x5f,0xea,0x0c,0x60,0x00,0xd4,0x62,0xb6,0xbd,0xe8,0xf0,0x81,
 
 };
 
@@ -676,7 +682,7 @@ InstallBeacon (
 #define HAL_ROW_ENTER      8
 #define HAL_ROW_RETURN     9
 #define HAL_ROW_SUB_ENTER  10
-#define HAL_TRACE          1    /* rows 8-17; BeaconMark flushes per page only */
+#define HAL_TRACE          0    /* v17: OFF - test the TTBR0 S-bit fix without the stubs' cache side effects */
 #define HAL_ROW_SUB_RETURN 11
 
 
@@ -739,7 +745,7 @@ ThumbBlVa (
   HalpAcpiFindRsdp never returns (v8).
 */
 typedef struct {
-  UINT8   Level;     /* 1..4                            */
+  UINT8   Level;     /* 2..7 (7 -> rows 10/11)          */
   UINT8   Id;        /* n                               */
   UINT32  Site;      /* hal RVA of a BL                 */
   UINT32  Target;    /* hal RVA it must call (checked) */
@@ -748,9 +754,8 @@ typedef struct {
 
 STATIC CONST HAL_BL_HOOK  mHalBlHooks[] = {
   /* level 1: HalpDbgInitSystem stage 1 */
-  { 1, 1, 0x0002B31E, 0x0002F190 },   /* HalpCopyDebugDescriptor        */
-  { 1, 2, 0x0002B326, 0x0002F9BC },   /* HalpRegisterKdSupportFunctions */
-  { 1, 3, 0x0002B32E, 0x0000B3DC },   /* HalpAcpiGetTable ('DBGP')      */
+  /* (level 1 = HalpDbgInitSystem's calls: known since v7, 0x1003 / 0x1002;
+     dropped in v15, rows 10/11 now show level 7) */
   /* level 2: HalpAcpiGetTable work routine */
   { 2, 1, 0x0000B596, 0x0002EC4C },   /* HalpAcpiTableCacheInit         */
   { 2, 2, 0x0000B57E, 0x0000B5B0 },   /* HalpAcpiGetTableWork           */
@@ -786,11 +791,36 @@ STATIC CONST HAL_BL_HOOK  mHalBlHooks[] = {
   { 5, 5, 0x0000B6E0, 0x0000B3F0 },   /* HalpAcpiGetRsdt                */
   { 5, 6, 0x0000B738, 0x0000B7DC, 1 }, /* HalpAcpiCheckAndMapTable (XSDT loop, 6 stack args) */
   { 5, 7, 0x0000B7B0, 0x0000B7DC, 1 }, /* HalpAcpiCheckAndMapTable (FADT path) */
+  /* level 6 (rows 20/21): HalpAcpiGetRsdt (v13: entered, never returned) */
+  { 6, 1, 0x0000B406, 0x0000B664 },   /* HalpAcpiGetCachedTable ('RSDT') */
+  { 6, 2, 0x0000B418, 0x0000B664 },   /* HalpAcpiGetCachedTable ('XSDT') */
+  { 6, 3, 0x0000B44A, 0x0000B938 },   /* HalpMapPhysicalMemory64 (firmware XSDT) */
+  { 6, 4, 0x0000B45A, 0x0000276C },   /* memcmp (cached vs firmware header) */
+  { 6, 5, 0x0000B472, 0x0000BA60 },   /* HalpUnmapVirtualAddress        */
+  { 6, 6, 0x00011A92, 0x0000B7DC, 1 }, /* HalpAcpiCheckAndMapTable (header mismatch) */
+  { 6, 7, 0x0000B48C, 0x0000BAB8, 1 }, /* HalGetMemoryCachingRequirements (no LoaderBlock) */
+  /* level 7 (rows 10/11): HalpAcpiCheckAndMapTable (v14: entered from the
+     XSDT loop, never returned).  Not hookable: two indirect calls through
+     hal .data pointers and the checksum loop between 7.4 and 7.5 */
+  { 7, 1, 0x0000B816, 0x0000B938 },   /* HalpMapPhysicalMemory64 (header) */
+  { 7, 2, 0x0000B846, 0x0000BA60 },   /* HalpUnmapVirtualAddress (header) */
+  { 7, 3, 0x0000B860, 0x0000BAB8, 1 }, /* HalGetMemoryCachingRequirements */
+  { 7, 4, 0x0000B8B2, 0x0000BAB8, 1 }, /* HalGetMemoryCachingRequirements */
+  { 7, 5, 0x0000B8FE, 0x0000BA60 },   /* HalpUnmapVirtualAddress        */
+  { 7, 6, 0x0000B914, 0x0000B938 },   /* HalpMapPhysicalMemory64 (whole table) */
 };
 
 /* Row 20: the size CopyBiosTable asks HalpAcpiAllocateMemory for (r1 =
    table header Length + 16): shows whether the HAL read a sane length. */
 #define HAL_ROW_ALLOC_SIZE 20
+#define HAL_ALLOC_ROW      0    /* v14: row 20 = level 6 (alloc size was 0x5C, sane) */
+/* v15: paint a register at one hook's entry: r2 (table phys, low) of
+   HalpAcpiCheckAndMapTable from the XSDT loop -> row 22 (= bugcheck P3 row;
+   a bugcheck also repaints rows 19-21) */
+#define HAL_ARG_LEVEL      5
+#define HAL_ARG_ID         6
+#define HAL_ARG_REG        2
+#define HAL_ARG_ROW        22
 
 /* movs r0,#Id ; movw/movt r1,#borrow VA ; nop  (12 bytes, position-free:
    for stubs in the payload, which is not inside the kernel image) */
@@ -925,12 +955,36 @@ InstallHalTlbFix (
   UINT8   *Stub
   )
 {
-  STATIC CONST UINT16  Seq[] = {
-    0xF3BF, 0x8F4F,           /* dsb sy                */
-    0xEE08, 0x3F17,           /* mcr p15,0,r3,c8,c7,0  TLBIALL (Rt ignored) */
-    0xEE07, 0x3FD5,           /* mcr p15,0,r3,c7,c5,6  BPIALL  */
-    0xF3BF, 0x8F4F,           /* dsb sy                */
-    0xF3BF, 0x8F6F,           /* isb sy                */
+  /*
+    v18: clean the written PTEs to memory before the TLB invalidate.  The
+    real Scorpion walks Windows' page tables (TTBR0 attrs 0x09) without
+    seeing L1; the KEP's MMFR3 patch tells Windows the walk is coherent, so
+    nothing else cleans them (beacons v6..v16: every hang was a fresh HAL
+    mapping; each paint evicted L1 and "healed" the next call).
+  */
+  STATIC CONST UINT16  SeqUnmap[] = {    /* r2 = end of the zeroed PTE run, r1 = count */
+    0xB159,                     /* cbz r1, done                 */
+    0xEBA2, 0x0381,             /* sub.w r3, r2, r1, lsl #2     */
+    0xF023, 0x031F,             /* bic r3, r3, #31              */
+    0xF3BF, 0x8F4F,             /* dsb sy                       */
+    0x4293, 0xD203,             /* 1: cmp r3, r2 ; bhs done     */
+    0xEE07, 0x3F3A,             /* mcr DCCMVAC r3               */
+    0x3320, 0xE7F9,             /* adds r3, #32 ; b 1b          */
+    0xF3BF, 0x8F4F,             /* done: dsb sy                 */
+    0xEE08, 0x3F17,             /* TLBIALL                      */
+    0xEE07, 0x3FD5,             /* BPIALL                       */
+    0xF3BF, 0x8F4F,             /* dsb sy                       */
+    0xF3BF, 0x8F6F,             /* isb sy                       */
+  };
+  STATIC CONST UINT16  SeqMap[] = {      /* PTE was stored with str.w r2, [r3, r12] */
+    0x4463,                     /* add r3, r12                  */
+    0xF3BF, 0x8F4F,             /* dsb sy                       */
+    0xEE07, 0x3F3A,             /* mcr DCCMVAC r3               */
+    0xF3BF, 0x8F4F,             /* dsb sy                       */
+    0xEE08, 0x3F17,             /* TLBIALL                      */
+    0xEE07, 0x3FD5,             /* BPIALL                       */
+    0xF3BF, 0x8F4F,             /* dsb sy                       */
+    0xF3BF, 0x8F6F,             /* isb sy                       */
   };
   UINTN  Index, Done = 0;
 
@@ -942,17 +996,20 @@ InstallHalTlbFix (
       DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL TLB fix: hal+%x does not match, skipped\n", mHalTlbFix[Index].Rva));
       continue;
     }
-    CopyMem (Stub, Seq, sizeof (Seq));
-    ThumbBranchVa (Stub + sizeof (Seq), StubVa + sizeof (Seq), HalRuntime + mHalTlbFix[Index].Back);
+    CONST UINT16  *Seq    = (Index == 0) ? SeqUnmap : SeqMap;
+    UINTN         SeqSize = (Index == 0) ? sizeof (SeqUnmap) : sizeof (SeqMap);
+
+    CopyMem (Stub, Seq, SeqSize);
+    ThumbBranchVa (Stub + SeqSize, StubVa + SeqSize, HalRuntime + mHalTlbFix[Index].Back);
     ThumbBranchVa (Site, HalRuntime + mHalTlbFix[Index].Rva, StubVa);
     WriteBackInvalidateDataCacheRange (Site, 4);
     InvalidateInstructionCacheRange (Site, 4);
-    WriteBackInvalidateDataCacheRange (Stub, sizeof (Seq) + 4);
-    InvalidateInstructionCacheRange (Stub, sizeof (Seq) + 4);
-    Stub += (sizeof (Seq) + 4 + 7) & ~7u;
+    WriteBackInvalidateDataCacheRange (Stub, SeqSize + 4);
+    InvalidateInstructionCacheRange (Stub, SeqSize + 4);
+    Stub += (SeqSize + 4 + 7) & ~7u;
     Done++;
   }
-  DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL TLB fix: %u of %u sequences\n", Done, ARRAY_SIZE (mHalTlbFix)));
+  DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL TLB fix + PTE clean: %u of %u sequences\n", Done, ARRAY_SIZE (mHalTlbFix)));
   return Stub;
 }
 
@@ -1017,8 +1074,9 @@ InstallHalBeacon (
     UINT32  T = Table[2 * Index];
     UINT16  *H = (UINT16 *)Stub;
 
-    if (((T & 1) == 0) || (Index != 1)) {
-      continue;    /* not a Thumb pointer / only HalpDbgInitSystem (v6 result) */
+    if ((T & 1) == 0) {
+      continue;    /* not a Thumb pointer (v16: all callbacks again; v15 got
+                      HalpDbgInitSystem stage 1 through) */
     }
     H[0] = 0xE92D; H[1] = 0x407F;
     H[2] = 0x4604; H[3] = (UINT16)(0x2500 | Index); H[4] = 0x0222; H[5] = 0x432A;
@@ -1044,26 +1102,30 @@ InstallHalBeacon (
       DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: no BL at hal+%x, skipped\n", mHalBlHooks[Index].Site));
       continue;
     }
-    if ((mHalBlHooks[Index].Level == 5) && (mHalBlHooks[Index].Id == 1)) {
+    if ((mHalBlHooks[Index].Level == HAL_ARG_LEVEL) && (mHalBlHooks[Index].Id == HAL_ARG_ID)) {
       /*
-        paint r1 on row 20, then fall into the bracket stub right after:
-          push.w {r0-r6, lr} ; mov r2, r1 ; r0/r1 = row/borrow ; bl Mark ;
-          pop.w {r0-r6, lr}   (24 bytes, the bracket stub follows)
+        v16: paint TTBR1 (row 22) and TTBR0 (row 21) - the walk attributes
+        Windows really runs with on the Scorpion - then fall into the
+        bracket stub (48 bytes, stack balanced):
+          push.w {r0-r6, lr} ; mrc TTBR1 -> r2 ; row 22 ; bl Mark ;
+          mrc TTBR0 -> r2 ; row 21 ; bl Mark ; pop.w {r0-r6, lr}
       */
       UINT16  *H = (UINT16 *)Stub;
 
       H[0] = 0xE92D; H[1] = 0x407F;
-      H[2] = 0x460A;                                       /* mov r2, r1 */
-      StubArgs (Stub + 6, 0x80 | HAL_ROW_ALLOC_SIZE);
-      ThumbBranch (Stub + 18, mStubMark, TRUE);
-      H[11] = 0xE8BD; H[12] = 0x407F;                      /* pop.w {r0-r6, lr} */
-      H[13] = 0xBF00;
-      Stub += 28;                                          /* falls through into the bracket stub */
+      H[2] = 0xEE12; H[3] = 0x2F30;                        /* mrc p15,0,r2,c2,c0,1 TTBR1 */
+      StubArgs (Stub + 8, 0x80 | 22);
+      ThumbBranch (Stub + 20, mStubMark, TRUE);
+      H[12] = 0xEE12; H[13] = 0x2F10;                      /* mrc p15,0,r2,c2,c0,0 TTBR0 */
+      StubArgs (Stub + 28, 0x80 | 21);
+      ThumbBranch (Stub + 40, mStubMark, TRUE);
+      H[22] = 0xE8BD; H[23] = 0x407F;                      /* pop.w {r0-r6, lr} */
+      Stub += 48;                                          /* falls through into the bracket stub */
     }
     Stub = (mHalBlHooks[Index].StackArgs ? HalBracketStubStack : HalBracketStub) (
                            Stub, (UINT32)mHalBlHooks[Index].Level << 4, mHalBlHooks[Index].Id,
-                           HAL_ROW_SUB_ENTER + 2 * (mHalBlHooks[Index].Level - 1u),
-                           HAL_ROW_SUB_RETURN + 2 * (mHalBlHooks[Index].Level - 1u),
+                           (mHalBlHooks[Index].Level == 7) ? HAL_ROW_SUB_ENTER : HAL_ROW_SUB_ENTER + 2 * (mHalBlHooks[Index].Level - 1u),
+                           (mHalBlHooks[Index].Level == 7) ? HAL_ROW_SUB_RETURN : HAL_ROW_SUB_RETURN + 2 * (mHalBlHooks[Index].Level - 1u),
                            HAL_LINK_BASE + HalDelta + mHalBlHooks[Index].Target + 1);
     if ((INT32)(StubVa - SiteVa) >= 0x1000000 || (INT32)(StubVa - SiteVa) < -0x1000000) {
       DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: hal+%x -> %x out of BL range, skipped\n",

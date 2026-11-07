@@ -1,0 +1,31 @@
+[Defines]
+  INF_VERSION     = 0x00010005
+  BASE_NAME       = CacheCoherencyTest
+  FILE_GUID       = 3c9e1f7a-5b2d-4e60-8a1c-7d4b9e2f0a61
+  MODULE_TYPE     = UEFI_APPLICATION
+  VERSION_STRING  = 0.1
+  ENTRY_POINT     = CacheCoherencyTestMain
+
+[Sources]
+  CacheCoherencyTest.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  ArmPkg/ArmPkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiBootServicesTableLib
+  UefiLib
+  ArmLib
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  PrintLib
+
+[Protocols]
+  gEfiCpuArchProtocolGuid
+  gEfiLoadedImageProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid

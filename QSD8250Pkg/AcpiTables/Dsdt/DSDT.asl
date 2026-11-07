@@ -19,5 +19,6 @@ DefinitionBlock ("DSDT.aml", "DSDT", 5, "QCOM", "EDK2", 1)
   {
     include("Dsdt-Platform.asl")
     include("Dsdt-SD.asl")
+    include("Dsdt-Touch.asl")
   } // \_SB_
 }

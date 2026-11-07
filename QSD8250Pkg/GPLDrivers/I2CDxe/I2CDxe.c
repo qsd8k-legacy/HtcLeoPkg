@@ -547,6 +547,25 @@ HTCLEO_I2C_PROTOCOL gHtcLeoI2CProtocol = {
   msm_i2c_xfer
 };
 
+/*
+  Windows drives the I2C controller itself (htcleots, polled): leave its
+  clock on and the pins on the I2C function when UEFI goes away.
+*/
+STATIC EFI_EVENT mI2cExitBootServicesEvent;
+
+STATIC
+VOID
+EFIAPI
+I2CExitBootServices (
+  IN EFI_EVENT  Event,
+  IN VOID       *Context
+  )
+{
+	gInterrupt->DisableInterruptSource(gInterrupt, i2c_pdata.irq_nr);
+	gClock->ClkEnable(i2c_pdata.clk_nr);
+	i2c_pdata.set_mux_to_i2c(0);
+}
+
 EFI_STATUS
 EFIAPI
 I2CDxeInitialize(
@@ -570,6 +589,8 @@ I2CDxeInitialize(
     ASSERT_EFI_ERROR (Status);
 
   	msm_i2c_probe(&i2c_pdata);
+
+	gBS->CreateEvent (EVT_SIGNAL_EXIT_BOOT_SERVICES, TPL_NOTIFY, I2CExitBootServices, NULL, &mI2cExitBootServicesEvent);
 
 	// Install the i2c protocol onto a new handle
 	Status = gBS->InstallMultipleProtocolInterfaces(
