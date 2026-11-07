@@ -332,41 +332,72 @@ PatchKernelMcr (
 /*  the PTEs.  A boot-path BL to a known function is retargeted to a     */
 /*  stub that paints and then tail-branches to the original function,   */
 /*  so the lowest stripe on screen is the last milestone reached.  The   */
-/*  bugcheck hook paints stripe 22 and (BEACON_STALL) spins.             */
+/*  KeBugCheck2 hook paints the stop code and P1-P3 as 32-bit rows       */
+/*  19-22 (white cell = 1, bit 31 left) and (BEACON_STALL) spins: early   */
+/*  bugchecks, before boot graphics, become visible.                     */
 /* ------------------------------------------------------------------ */
 
 #define BEACON_ENABLE      1
 #define BEACON_STALL       1            /* bugcheck: paint then spin      */
-#define BEACON_HOOK_RVA    0x001754DC   /* KiBugCheckDebugBreak entry     */
-#define BEACON_BUGCHECK_ID 22
+#define BEACON_HOOK_RVA    0x0018148C   /* KeBugCheck2 entry (stmdb.w)    */
+#define BEACON_BUGCHECK_ID 19           /* rows 19..22: code, P1, P2, P3   */
 #define BEACON_CAVE_RVA    0x001BE23C   /* zero pad at end of .text       */
 #define BEACON_BORROW_RVA  0x00440000   /* PAGEVRFY: 16 pages, never run  */
+#define BEACON_CAVE_END_RVA 0x001BF000  /* .text's last page ends here    */
+
+/*
+  Debug payload: the cave in .text holds only BeaconMark, the bugcheck
+  trampoline, the milestone stubs and the HAL TLB fix.  Everything else (the
+  hal.dll trace stubs, as many as needed) goes to a firmware-reserved region
+  (MemoryMap.h "KEP Debug Payload", top of HLOS 3, EfiReservedMemoryType).
+  The milestone 0 stub first calls BeaconMapPayload, which points the PTEs
+  of PAGEVRFY pages 16..29 (never run; pages 0..15 are the painter's borrow)
+  at it through the 0xC0000000 self-map: kernel VA = nt + KEP_PAYLOAD_RVA.
+*/
+#define KEP_PAYLOAD_PHYS   0x2CC00000
+#define KEP_PAYLOAD_SIZE   0x00100000   /* reserved in the memory map     */
+#define KEP_PAYLOAD_RVA    0x00450000
+#define KEP_PAYLOAD_PAGES  14           /* mapped at the kernel VA: 56 KiB */
+
+STATIC UINT8   *mBeaconKernel;       /* ntoskrnl, physical (= where we patch) */
+STATIC UINT8   *mBeaconNextStub;     /* free space in the cave after the milestone stubs */
+STATIC UINT8   *mBeaconMarkPhys;
+STATIC BOOLEAN mPayloadMapped;       /* milestone 0 maps the payload    */
+STATIC UINT8   *mStubMark;           /* BeaconMark the HAL stubs call (payload copy) */
+STATIC UINT32  mStubBorrowVa;        /* absolute borrow VA for the payload stubs */
 
 typedef struct {
   UINT32  Site;     /* RVA of a BL                          */
   UINT32  Target;   /* RVA it must call (checked)           */
 } BEACON_MILESTONE;
 
-/* Index = stripe id.  Phase 0 boot path, then a few Phase 1 points. */
+/* Index = stripe id.  Kernel entry through Phase 0, then two Phase 1 points.
+   1..7 bracket every call KiInitializeBootStructures makes before
+   KiSetFeatureBits (the real HD2 stopped between 0 and 1 of the old list;
+   7 = HAL!HalInitializeProcessor returned). */
 STATIC CONST BEACON_MILESTONE  mMilestones[] = {
   { 0x0023C060, 0x0023DD04 },   /*  0 KiSystemStartup -> KiInitializeBootStructures */
-  { 0x0023DE26, 0x0023E274 },   /*  1   -> KiSetFeatureBits                         */
-  { 0x0023C06E, 0x0045F1CC },   /*  2 KiSystemStartup -> KdInitSystem               */
-  { 0x0023C0A2, 0x0023E3A4 },   /*  3 KiSystemStartup -> KiInitializeKernel         */
-  { 0x0023E51A, 0x004C2F94 },   /*  4 KiInitializeKernel -> KiInitSystem            */
-  { 0x0023E5DE, 0x004C9598 },   /*  5 KiInitializeKernel -> InitBootProcessor       */
-  { 0x004C95AA, 0x004C52EC },   /*  6 InitBootProcessor -> ExpValidateLoader        */
-  { 0x004C9612, 0x004BA170 },   /*  7   -> Whea default config (before HalInitSystem 0) */
-  { 0x004C9682, 0x004BAD5C },   /*  8   -> KeInitializeClock (HalInitSystem 0 returned) */
-  { 0x004C97A2, 0x004B6278 },   /*  9   -> ExInitSystem                             */
-  { 0x004C97BE, 0x004C3DC0 },   /* 10   -> MmInitSystem                             */
-  { 0x004C97D2, 0x004BD8B8 },   /* 11   -> InbvDriverInitialize                     */
-  { 0x004C998E, 0x004CA914 },   /* 12   -> ObInitSystem                             */
-  { 0x004C99A0, 0x004C111C },   /* 13   -> PsInitSystem                             */
-  { 0x0023E5E4, 0x0023E864 },   /* 14 KiInitializeKernel -> HalInitSystem(1) wrapper */
-  { 0x004C7140, 0x004B6278 },   /* 15 Phase1InitializationDiscard -> ExInitSystem   */
-  { 0x004C71E2, 0x004B7EE8 },   /* 16   -> SeInitSystem                             */
-  { 0x004C6E76, 0x004BD8B8 },   /* 17   -> InbvDriverInitialize                     */
+  { 0x0023DDAE, 0x00021D60 },   /*  1   -> memset                                  */
+  { 0x0023DDD4, 0x000F08D0 },   /*  2   -> KiInitializeExceptionVectorTable (a)    */
+  { 0x0023DDEA, 0x000F09E0 },   /*  3   -> RtlInitTickLock                         */
+  { 0x0023DDF0, 0x000F08D0 },   /*  4   -> KiInitializeExceptionVectorTable (b)    */
+  { 0x0023DDFC, 0x004BD8B8 },   /*  5   -> InbvDriverInitialize                    */
+  { 0x0023DE0C, 0x000E5C90 },   /*  6   -> strstr (next: HalInitializeProcessor)   */
+  { 0x0023DE26, 0x0023E274 },   /*  7   -> KiSetFeatureBits                        */
+  { 0x0023C06E, 0x0045F1CC },   /*  8 KiSystemStartup -> KdInitSystem              */
+  { 0x0023C0A2, 0x0023E3A4 },   /*  9 KiSystemStartup -> KiInitializeKernel        */
+  { 0x0023E51A, 0x004C2F94 },   /* 10 KiInitializeKernel -> KiInitSystem           */
+  { 0x0023E5DE, 0x004C9598 },   /* 11 KiInitializeKernel -> InitBootProcessor      */
+  { 0x004C95AA, 0x004C52EC },   /* 12 InitBootProcessor -> ExpValidateLoader       */
+  { 0x004C9612, 0x004BA170 },   /* 13   -> Whea default config (before HalInitSystem 0) */
+  { 0x004C9682, 0x004BAD5C },   /* 14   -> KeInitializeClock (HalInitSystem 0 returned) */
+  { 0x004C97A2, 0x004B6278 },   /* 15   -> ExInitSystem                            */
+  { 0x004C97BE, 0x004C3DC0 },   /* 16   -> MmInitSystem                            */
+  { 0x004C97D2, 0x004BD8B8 },   /* 17   -> InbvDriverInitialize                    */
+  { 0x004C998E, 0x004CA914 },   /* 18   -> ObInitSystem                            */
+  { 0x004C99A0, 0x004C111C },   /* 19   -> PsInitSystem                            */
+  { 0x004C7140, 0x004B6278 },   /* 20 Phase1InitializationDiscard -> ExInitSystem  */
+  { 0x004C71E2, 0x004B7EE8 },   /* 21   -> SeInitSystem                            */
 };
 
 /*
@@ -374,31 +405,45 @@ STATIC CONST BEACON_MILESTONE  mMilestones[] = {
   clang --target=armv7a-none-eabi -mthumb -Os -ffreestanding -fno-builtin
   -fno-jump-tables; verified: no relocations, no calls, constants only.
 */
+#define BEACON_MAP_OFFSET  0x1C0     /* BeaconMapPayload in the blob */
 STATIC CONST UINT8  mBeaconMark[] = {
-  0x2d,0xe9,0xf0,0x43,0x90,0xb0,0xef,0xf3,0x00,0x8c,0x72,0xb6,0x6a,0x46,0x92,0x0a,
-  0x02,0xf1,0x40,0x42,0x22,0xf0,0x03,0x02,0x12,0x68,0x93,0x07,0x40,0xf1,0xa3,0x80,
-  0x6f,0xf3,0x1f,0x32,0x16,0x28,0x28,0xbf,0x16,0x20,0x42,0xea,0x00,0x42,0x4f,0xf6,
-  0xfc,0x78,0xee,0x46,0x42,0xf0,0x28,0x79,0xc0,0xf2,0x3f,0x08,0x00,0x24,0x4f,0xf0,
-  0x40,0x45,0x76,0x46,0x0f,0x19,0x09,0xeb,0x04,0x02,0x04,0xf5,0x80,0x54,0x08,0xea,
-  0x97,0x27,0xb4,0xf5,0x80,0x3f,0x7b,0x59,0x7a,0x51,0x07,0xf1,0x40,0x42,0x46,0xf8,
-  0x04,0x3b,0x07,0xee,0x3a,0x2f,0xed,0xd1,0x00,0x22,0xbf,0xf3,0x4f,0x8f,0x8b,0x18,
-  0x02,0xf5,0x80,0x52,0xb2,0xf5,0x80,0x3f,0x08,0xee,0x37,0x3f,0xf7,0xd1,0x25,0x22,
-  0x01,0x24,0x42,0x43,0x40,0xf2,0x00,0x09,0x48,0xf6,0x89,0x06,0xcf,0xf6,0xff,0x79,
-  0xc8,0xf6,0x88,0x06,0xa0,0xeb,0x12,0x23,0xdb,0xb2,0x5b,0x08,0x03,0xeb,0x12,0x22,
-  0xd2,0xb2,0x92,0x08,0xa2,0xeb,0xc2,0x02,0x83,0x18,0x80,0x03,0x07,0x46,0xda,0x07,
-  0x54,0xfa,0x83,0xf3,0x4f,0xf0,0x7f,0x42,0x04,0xbf,0x00,0x22,0xcf,0xf6,0xff,0x72,
-  0x9c,0x07,0x48,0xbf,0x02,0xf5,0x7f,0x42,0x5b,0x07,0x48,0xbf,0xff,0x32,0xbf,0xf3,
-  0x4f,0x8f,0x00,0x24,0xbf,0xf3,0x6f,0x8f,0xa7,0xfb,0x06,0x35,0x2b,0x0a,0x1b,0x01,
-  0xa3,0xeb,0x15,0x23,0xa0,0xeb,0x43,0x13,0x23,0x44,0x3f,0x2b,0x07,0xd8,0x13,0x46,
-  0xb4,0xf5,0xf0,0x7f,0x38,0xbf,0x4f,0xf0,0x7f,0x43,0x41,0xf8,0x24,0x30,0x01,0x34,
-  0x01,0x37,0xb4,0xf5,0x80,0x4f,0xe7,0xd1,0x49,0x45,0x07,0xd2,0x01,0xf5,0x80,0x30,
-  0x0a,0x46,0x07,0xee,0x3a,0x2f,0x20,0x32,0x82,0x42,0xfa,0xd3,0x6f,0xf0,0x03,0x00,
-  0x00,0x22,0x00,0xea,0x91,0x20,0x4f,0xf0,0x40,0x44,0xbf,0xf3,0x4f,0x8f,0x85,0x18,
-  0x5e,0xf8,0x02,0x30,0x05,0xea,0x08,0x05,0x04,0x32,0x2b,0x51,0x05,0xf1,0x40,0x43,
-  0x40,0x2a,0x07,0xee,0x3a,0x3f,0xf2,0xd1,0x00,0x20,0xbf,0xf3,0x4f,0x8f,0x0a,0x18,
-  0x00,0xf5,0x80,0x50,0xb0,0xf5,0x80,0x3f,0x08,0xee,0x37,0x2f,0xf7,0xd1,0xbf,0xf3,
-  0x4f,0x8f,0xbf,0xf3,0x6f,0x8f,0x5f,0xea,0x0c,0x60,0x00,0xd4,0x62,0xb6,0x10,0xb0,
-  0xbd,0xe8,0xf0,0x83
+  0x2d,0xe9,0xf0,0x4f,0x92,0xb0,0x01,0x92,0xef,0xf3,0x00,0x82,0x72,0xb6,0x6b,0x46,
+  0x9b,0x0a,0x03,0xf1,0x40,0x43,0x23,0xf0,0x03,0x03,0x1f,0x68,0xbb,0x07,0x40,0xf1,
+  0xc9,0x80,0x00,0xf0,0x3f,0x09,0x6f,0xf3,0xdf,0x27,0xb9,0xf1,0x16,0x0f,0x28,0xbf,
+  0x4f,0xf0,0x16,0x09,0x47,0xea,0x09,0x47,0x4f,0xf6,0xfc,0x7b,0x47,0xf0,0x28,0x7c,
+  0x02,0xad,0xc0,0xf2,0x3f,0x0b,0x00,0x26,0x4f,0xf0,0x40,0x4e,0x8b,0x19,0x0c,0xeb,
+  0x06,0x07,0x06,0xf5,0x80,0x56,0x0b,0xea,0x93,0x23,0xb6,0xf5,0x80,0x3f,0x53,0xf8,
+  0x0e,0x40,0x43,0xf8,0x0e,0x70,0x03,0xf1,0x40,0x43,0x45,0xf8,0x04,0x4b,0x07,0xee,
+  0x3a,0x3f,0xeb,0xd1,0x00,0x92,0x00,0x27,0xbf,0xf3,0x4f,0x8f,0xcb,0x19,0x07,0xf5,
+  0x80,0x57,0xb7,0xf5,0x80,0x3f,0x08,0xee,0x37,0x3f,0xf7,0xd1,0x25,0x23,0x4f,0xf0,
+  0x7f,0x4c,0x09,0xfb,0x03,0xf3,0x48,0xf6,0x89,0x04,0xc8,0xf6,0x88,0x04,0x1b,0x0a,
+  0xa3,0xeb,0xc3,0x03,0x4b,0x44,0x4f,0xea,0x89,0x39,0x4d,0x46,0xdf,0x07,0x04,0xbf,
+  0x40,0xf2,0x00,0x0c,0xcf,0xf6,0xff,0x7c,0x01,0x27,0x57,0xfa,0x83,0xf3,0x9f,0x07,
+  0x48,0xbf,0x0c,0xf5,0x7f,0x4c,0x5b,0x07,0x48,0xbf,0x0c,0xf1,0xff,0x0c,0x20,0x23,
+  0x03,0xea,0x50,0x08,0x08,0xf1,0x20,0x02,0xbf,0xf3,0x4f,0x8f,0x00,0x27,0xbf,0xf3,
+  0x6f,0x8f,0xa5,0xfb,0x04,0x36,0x33,0x0a,0x1b,0x01,0xa3,0xeb,0x16,0x23,0xa9,0xeb,
+  0x43,0x13,0x07,0xeb,0x03,0x0e,0x03,0x06,0x05,0xd4,0xc6,0x45,0x22,0xd3,0x96,0x45,
+  0x20,0xd2,0xe2,0x46,0x17,0xe0,0x1f,0xfa,0x8e,0xf3,0x48,0xf6,0x89,0x06,0x73,0x43,
+  0x01,0x9e,0x4f,0xf0,0xff,0x3a,0xdb,0x0c,0x9e,0x40,0xa3,0xeb,0x03,0x13,0x73,0x44,
+  0xf6,0x0f,0x04,0xbf,0x43,0xf2,0x30,0x0a,0xcf,0xf6,0x30,0x7a,0x9b,0xb2,0x0e,0x2b,
+  0x08,0xbf,0x4f,0xf0,0x7f,0x4a,0xb7,0xf5,0xf0,0x7f,0x38,0xbf,0x4f,0xf0,0x7f,0x4a,
+  0x41,0xf8,0x27,0xa0,0x01,0x37,0x01,0x35,0xb7,0xf5,0x80,0x4f,0xc9,0xd1,0x00,0x20,
+  0xcf,0xf6,0xff,0x70,0x81,0x42,0x07,0xd2,0x01,0xf5,0x80,0x30,0x0a,0x46,0x07,0xee,
+  0x3a,0x2f,0x20,0x32,0x82,0x42,0xfa,0xd3,0x6f,0xf0,0x03,0x00,0x02,0xad,0x00,0xea,
+  0x91,0x20,0x00,0x22,0x4f,0xf0,0x40,0x47,0xbf,0xf3,0x4f,0x8f,0x86,0x18,0xab,0x58,
+  0x06,0xea,0x0b,0x06,0x04,0x32,0xf3,0x51,0x06,0xf1,0x40,0x43,0x40,0x2a,0x07,0xee,
+  0x3a,0x3f,0xf3,0xd1,0x00,0x20,0xbf,0xf3,0x4f,0x8f,0x0a,0x18,0x00,0xf5,0x80,0x50,
+  0xb0,0xf5,0x80,0x3f,0x08,0xee,0x37,0x2f,0xf7,0xd1,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,
+  0x6f,0x8f,0x00,0x9a,0x10,0x06,0x00,0xd4,0x62,0xb6,0x12,0xb0,0xbd,0xe8,0xf0,0x8f,
+  0x2d,0xe9,0xf0,0x41,0xef,0xf3,0x00,0x8c,0x72,0xb6,0x6b,0x46,0x9b,0x0a,0x03,0xf1,
+  0x40,0x43,0x23,0xf0,0x03,0x03,0x1b,0x68,0x9e,0x07,0x2f,0xd5,0x1a,0xb3,0x4f,0xf6,
+  0xfc,0x7e,0x40,0xf2,0xfe,0x76,0x33,0x40,0xc0,0xf2,0x3f,0x0e,0x4f,0xf0,0x40,0x48,
+  0x05,0x46,0x16,0x46,0x0e,0xea,0x95,0x27,0x41,0xea,0x03,0x04,0x01,0xf5,0x80,0x51,
+  0x05,0xf5,0x80,0x55,0x01,0x3e,0x47,0xf8,0x08,0x40,0x07,0xf1,0x40,0x44,0x07,0xee,
+  0x3a,0x4f,0xef,0xd1,0xbf,0xf3,0x4f,0x8f,0x08,0xee,0x37,0x0f,0x00,0xf5,0x80,0x50,
+  0x01,0x3a,0xf9,0xd1,0x01,0xe0,0xbf,0xf3,0x4f,0x8f,0x00,0x20,0x07,0xee,0x15,0x0f,
+  0x07,0xee,0xd5,0x0f,0xbf,0xf3,0x4f,0x8f,0xbf,0xf3,0x6f,0x8f,0x5f,0xea,0x0c,0x60,
+  0x00,0xd4,0x62,0xb6,0xbd,0xe8,0xf0,0x81,
 
 };
 
@@ -495,7 +540,7 @@ InstallBeacon (
   UINT8   *Cave  = KernelBase + BEACON_CAVE_RVA;
   UINT8   *Mark  = Cave;
   UINT8   *Tramp = Cave + ((sizeof (mBeaconMark) + 3) & ~3U);
-  UINT8   *Stub  = Tramp + 20;
+  UINT8   *Stub  = Tramp + 84;
   UINT8   *Hook  = KernelBase + BEACON_HOOK_RVA;
   UINTN   Hooked = 0;
   UINTN   Index;
@@ -503,31 +548,41 @@ InstallBeacon (
   CopyMem (Mark, mBeaconMark, sizeof (mBeaconMark));
 
   /*
-    bugcheck trampoline (B.W from KiBugCheckDebugBreak):
-      +0  movs/movw/movt/add  r0 = 22, r1 = borrow VA
-      +12 bl   BeaconMark
-      +16 b    .                 (BEACON_STALL)
+    bugcheck trampoline (B.W from KeBugCheck2's first instruction; never
+    returns, so r4-r7 are free):
+      +0  mov r4..r7, r0..r3            code, P1, P2, P3
+      +8  4 x { r0 = 0x80 | (19 + n), r1 = borrow VA ; mov r2, r4+n ;
+                bl BeaconMark }          18 bytes each
+      +80 b .                            (BEACON_STALL)
     All offsets are image-relative, so the same bytes are right at the
     physical load address we patch and at the kernel VA it runs from.
   */
-  BeaconArgs (Tramp, KernelBase, BEACON_BUGCHECK_ID);
-  ThumbBranch (Tramp + 12, Mark, TRUE);
+  ((UINT16 *)Tramp)[0] = 0x4604; ((UINT16 *)Tramp)[1] = 0x460D;    /* mov r4,r0 ; mov r5,r1 */
+  ((UINT16 *)Tramp)[2] = 0x4616; ((UINT16 *)Tramp)[3] = 0x461F;    /* mov r6,r2 ; mov r7,r3 */
+  for (Index = 0; Index < 4; Index++) {
+    UINT8  *At = Tramp + 8 + 18 * Index;
+
+    BeaconArgs (At, KernelBase, 0x80 | (BEACON_BUGCHECK_ID + (UINT32)Index));
+    ((UINT16 *)(At + 12))[0] = (UINT16)(0x4622 | (Index << 3));   /* mov r2, r4+Index */
+    ThumbBranch (At + 14, Mark, TRUE);
+  }
  #if BEACON_STALL
-  ((UINT16 *)Tramp)[8] = 0xE7FE;                    /* b . */
+  ((UINT16 *)Tramp)[40] = 0xE7FE;                    /* b . */
  #endif
   ThumbBranch (Hook, Tramp, FALSE);
   WriteBackInvalidateDataCacheRange (Hook, 4);
   InvalidateInstructionCacheRange (Hook, 4);
 
   /*
-    milestone stub (28 bytes), the hooked BL now calls it:
+    milestone stub (44 bytes), the hooked BL now calls it:
       +0  push.w {r0-r3, r12, lr}
-      +4  movs/movw/movt/add  r0 = id, r1 = borrow VA
-      +16 bl   BeaconMark
-      +20 pop.w  {r0-r3, r12, lr}
-      +24 b.w  original target       (returns straight to the hooked caller)
+      +4  r0 = id,        r1 = borrow VA ; +16 bl BeaconMark  (left 32 px)
+      +20 r0 = id | 0x40, r1 = borrow VA ; +32 bl BeaconMark  (right 32 px:
+          only there if the first call came back)
+      +36 pop.w  {r0-r3, r12, lr}
+      +40 b.w  original target       (returns straight to the hooked caller)
   */
-  for (Index = 0; Index < ARRAY_SIZE (mMilestones); Index++, Stub += 28) {
+  for (Index = 0; Index < ARRAY_SIZE (mMilestones); Index++, Stub += 44) {
     UINT8  *Site   = KernelBase + mMilestones[Index].Site;
     UINT8  *Target = KernelBase + mMilestones[Index].Target;
 
@@ -539,20 +594,495 @@ InstallBeacon (
     ((UINT16 *)Stub)[0] = 0xE92D;  ((UINT16 *)Stub)[1] = 0x500F;   /* push.w {r0-r3,r12,lr} */
     BeaconArgs (Stub + 4, KernelBase, (UINT32)Index);
     ThumbBranch (Stub + 16, Mark, TRUE);
-    ((UINT16 *)Stub)[10] = 0xE8BD; ((UINT16 *)Stub)[11] = 0x500F;  /* pop.w {r0-r3,r12,lr} */
-    ThumbBranch (Stub + 24, Target, FALSE);
+    BeaconArgs (Stub + 20, KernelBase, (UINT32)Index | 0x40);
+    ThumbBranch (Stub + 32, Mark, TRUE);
+    ((UINT16 *)Stub)[18] = 0xE8BD; ((UINT16 *)Stub)[19] = 0x500F;  /* pop.w {r0-r3,r12,lr} */
+    ThumbBranch (Stub + 40, Target, FALSE);
     ThumbBranch (Site, Stub, TRUE);
     WriteBackInvalidateDataCacheRange (Site, 4);
     InvalidateInstructionCacheRange (Site, 4);
     Hooked++;
   }
 
+  /*
+    payload mapper, called first by milestone 0 (36 bytes):
+      +0  push.w {r0-r3, r12, lr}
+      +4  movw/movt r0, delta ; +12 add r0, pc      r0 = payload kernel VA
+      +14 movw/movt r1, KEP_PAYLOAD_PHYS ; +22 movs r2, #pages
+      +24 bl BeaconMapPayload
+      +28 pop.w {r0-r3, r12, lr} ; +32 b.w milestone 0 stub
+  */
+  if (ThumbBlTarget (KernelBase + mMilestones[0].Site) == Tramp + 84) {
+    UINT16  *H     = (UINT16 *)Stub;
+    UINT32  Delta  = (UINT32)((INTN)(KernelBase + KEP_PAYLOAD_RVA) - ((INTN)Stub + 12 + 4));
+    UINT8   *Site0 = KernelBase + mMilestones[0].Site;
+
+    H[0] = 0xE92D; H[1] = 0x500F;
+    ThumbMovwt (Stub + 4, 0, (UINT16)Delta, FALSE);
+    ThumbMovwt (Stub + 8, 0, (UINT16)(Delta >> 16), TRUE);
+    H[6] = 0x4478;                                          /* add r0, pc */
+    ThumbMovwt (Stub + 14, 1, (UINT16)KEP_PAYLOAD_PHYS, FALSE);
+    ThumbMovwt (Stub + 18, 1, (UINT16)(KEP_PAYLOAD_PHYS >> 16), TRUE);
+    H[11] = (UINT16)(0x2200 | KEP_PAYLOAD_PAGES);           /* movs r2, #pages */
+    ThumbBranch (Stub + 24, Mark + BEACON_MAP_OFFSET, TRUE);
+    H[14] = 0xE8BD; H[15] = 0x500F;
+    ThumbBranch (Stub + 32, Tramp + 84, FALSE);
+    ThumbBranch (Site0, Stub, TRUE);
+    WriteBackInvalidateDataCacheRange (Site0, 4);
+    InvalidateInstructionCacheRange (Site0, 4);
+    Stub += 36;
+    mPayloadMapped = TRUE;
+  }
+  DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: payload: %a at phys %x -> nt+%x, %u pages\n",
+          mPayloadMapped ? "mapper armed" : "NO MAPPER (milestone 0 missing)",
+          KEP_PAYLOAD_PHYS, KEP_PAYLOAD_RVA, KEP_PAYLOAD_PAGES));
+
   WriteBackInvalidateDataCacheRange (Cave, (UINTN)(Stub - Cave));
   InvalidateInstructionCacheRange (Cave, (UINTN)(Stub - Cave));
+  mBeaconKernel   = KernelBase;
+  mBeaconMarkPhys = Mark;
+  mBeaconNextStub = Stub;
 
   DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: beacon v2: %u/%u milestones, bugcheck hook %x, cave %p (%u bytes)\n",
           Hooked, ARRAY_SIZE (mMilestones), BEACON_HOOK_RVA, Cave, (UINT32)(Stub - Cave)));
  #endif
+}
+
+/* ------------------------------------------------------------------ */
+/*  HAL beacon: which HAL init subsystem callback never returns.         */
+/*                                                                       */
+/*  HalInitializeProcessor / HalInitSystem run HAL init stages through   */
+/*  HalpInitSystemHelper, which calls the 19 subsystem callbacks of a    */
+/*  table in hal.dll's .data (RVA 0x1E6D8, 8 bytes per entry, first word */
+/*  the callback).  Each entry is redirected to a stub in ntoskrnl's     */
+/*  cave that paints row 8 = stage << 8 | index on entry, calls the       */
+/*  callback with r0-r3 unchanged, paints row 9 = the same on return and */
+/*  returns the callback's result.  Rows 8 != 9 on screen = the callback */
+/*  in row 8 never came back.                                            */
+/*                                                                       */
+/*  Runtime VAs come from pointers winload relocated before              */
+/*  ExitBootServices: the callback table itself, and an ntoskrnl pointer */
+/*  to its own .data (RVA 0x23E270, link-time value 0x005DF794).         */
+/* ------------------------------------------------------------------ */
+
+#define HAL_TIMESTAMP      0x538BAE0F
+#define HAL_SIZE_OF_IMAGE  0x0003B000
+#define HAL_TABLE_RVA      0x0001E6D8
+#define HAL_TABLE_ENTRIES  19
+#define HAL_LINK_BASE      0x80010000
+#define NT_LINK_BASE       0x00400000
+#define NT_SELFPTR_RVA     0x0023E270
+#define NT_SELFPTR_LINK    0x005DF794
+#define HAL_ROW_ENTER      8
+#define HAL_ROW_RETURN     9
+#define HAL_ROW_SUB_ENTER  10
+#define HAL_TRACE          1    /* rows 8-17; BeaconMark flushes per page only */
+#define HAL_ROW_SUB_RETURN 11
+
+
+STATIC
+UINT8 *
+FindHal (
+  UINT8  *Start,
+  UINTN  Size
+  )
+{
+  UINTN  o;
+
+  for (o = 0; o + 0x1000 <= Size; o += 0x1000) {
+    UINT8   *M = Start + o;
+    UINT32  Pe;
+
+    if ((M[0] != 'M') || (M[1] != 'Z')) {
+      continue;
+    }
+    Pe = ReadUnaligned32 ((UINT32 *)(M + 0x3C));
+    if ((Pe > 0x800) || (ReadUnaligned32 ((UINT32 *)(M + Pe)) != 0x00004550)) {
+      continue;
+    }
+    if ((ReadUnaligned32 ((UINT32 *)(M + Pe + 8)) == HAL_TIMESTAMP) &&
+        (ReadUnaligned32 ((UINT32 *)(M + Pe + 24 + 56)) == HAL_SIZE_OF_IMAGE)) {
+      /*
+        Booting from disk, winload also keeps hal.dll's raw FILE in memory
+        (sections not at their RVAs, callback table 0).  Only the mapped,
+        relocated image has a Thumb pointer there with a page-aligned delta.
+      */
+      UINT32  T0 = ReadUnaligned32 ((UINT32 *)(M + HAL_TABLE_RVA));
+
+      if ((o + HAL_TABLE_RVA + 8 * HAL_TABLE_ENTRIES <= Size) && ((T0 & 1) != 0) &&
+          (((T0 - 0x8003B229) & 0xFFF) == 0)) {
+        return M;
+      }
+      DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: hal.dll copy at %p is not the mapped image, skipped\n", M));
+    }
+  }
+  return NULL;
+}
+
+/* Thumb-2 BL at At (runtime VA AtVa) to runtime VA TargetVa. */
+STATIC
+VOID
+ThumbBlVa (
+  UINT8   *At,
+  UINT32  AtVa,
+  UINT32  TargetVa
+  )
+{
+  ThumbBranch (At, At + (INT32)((TargetVa & ~1u) - AtVa), TRUE);
+}
+
+/*
+  BLs inside hal.dll on the hanging path, bracketed like the callbacks: a
+  level per nesting depth, rows 10+2*(level-1) (entered) / +1 (returned),
+  value level << 12 | n.  Real HD2 so far: HalpDbgInitSystem stage 1 ->
+  HalpAcpiGetTable (LoaderBlock, 'DBGP') -> HalpAcpiTableCacheInit ->
+  HalpAcpiFindRsdp never returns (v8).
+*/
+typedef struct {
+  UINT8   Level;     /* 1..4                            */
+  UINT8   Id;        /* n                               */
+  UINT32  Site;      /* hal RVA of a BL                 */
+  UINT32  Target;    /* hal RVA it must call (checked) */
+  UINT8   StackArgs; /* callee takes stack arguments: forward 6 words */
+} HAL_BL_HOOK;
+
+STATIC CONST HAL_BL_HOOK  mHalBlHooks[] = {
+  /* level 1: HalpDbgInitSystem stage 1 */
+  { 1, 1, 0x0002B31E, 0x0002F190 },   /* HalpCopyDebugDescriptor        */
+  { 1, 2, 0x0002B326, 0x0002F9BC },   /* HalpRegisterKdSupportFunctions */
+  { 1, 3, 0x0002B32E, 0x0000B3DC },   /* HalpAcpiGetTable ('DBGP')      */
+  /* level 2: HalpAcpiGetTable work routine */
+  { 2, 1, 0x0000B596, 0x0002EC4C },   /* HalpAcpiTableCacheInit         */
+  { 2, 2, 0x0000B57E, 0x0000B5B0 },   /* HalpAcpiGetTableWork           */
+  /* level 3: HalpAcpiTableCacheInit */
+  { 3, 1, 0x0002EC86, 0x0002F70C },   /* HalpAcpiFindRsdp               */
+  { 3, 2, 0x0002ECAC, 0x0000B664 },   /* HalpAcpiGetCachedTable (XSDT)  */
+  { 3, 3, 0x0002ECBC, 0x0000B664 },   /* HalpAcpiGetCachedTable (RSDT)  */
+  { 3, 4, 0x0002ECEC, 0x0000B938 },   /* HalpMapPhysicalMemory64 (head) */
+  { 3, 5, 0x0002ED0E, 0x0000BA60 },   /* HalpUnmapVirtualAddress        */
+  { 3, 6, 0x0002ED22, 0x0000B938 },   /* HalpMapPhysicalMemory64 (all)  */
+  { 3, 7, 0x0002ED36, 0x0000AFFC },   /* HalpAcpiCopyBiosTable          */
+  { 3, 8, 0x0002ED54, 0x0000BA60 },   /* HalpUnmapVirtualAddress        */
+  { 3, 9, 0x0002ED5C, 0x0000AF84 },   /* HalpAcpiCacheTable             */
+  /* level 4: HalpAcpiFindRsdp (v8: entered, never returned).  Its ARC
+     configuration tree walk (KeFind[Next]ConfigurationEntry through the
+     IAT) brackets strcmp; the found branch allocates and copies */
+  { 4, 1, 0x0002F742, 0x0000E434 },   /* strcmp (Identifier, "ACPI BIOS") */
+  { 4, 2, 0x0002F776, 0x0000B0AC },   /* HalpAcpiAllocateMemory         */
+  { 4, 3, 0x0002F78A, 0x00001E80 },   /* memmove (RSDP data)            */
+  /* level 5: HalpAcpiCopyBiosTable (v9/v11: entered, never returned) */
+  { 5, 1, 0x0000B00E, 0x0000B0AC },   /* HalpAcpiAllocateMemory (length + 16) */
+  { 5, 2, 0x0000B020, 0x00002700 },   /* memset                         */
+  { 5, 3, 0x0000B034, 0x00001E80 },   /* memmove (the table)            */
+  { 5, 4, 0x0000B03C, 0x0000B050 },   /* HalpAcpiValidateAcpiTable      */
+  /* level 4 (cont.): HalpAcpiGetTableWork ('DBGP'; v12: entered, never
+     returned, after TableCacheInit completed) */
+  { 4, 4, 0x0000B5CC, 0x0000B664 },   /* HalpAcpiGetCachedTable (list walk) */
+  { 4, 5, 0x0000B60C, 0x0000B6A4, 1 }, /* HalpAcpiGetTableFromBios (2 stack args) */
+  { 4, 6, 0x0000B61E, 0x0000AFFC },   /* HalpAcpiCopyBiosTable          */
+  { 4, 7, 0x0000B63A, 0x0000BA60 },   /* HalpUnmapVirtualAddress        */
+  { 4, 8, 0x0000B644, 0x0000AF84 },   /* HalpAcpiCacheTable             */
+  /* level 5 (cont.): HalpAcpiGetTableFromBios */
+  { 5, 5, 0x0000B6E0, 0x0000B3F0 },   /* HalpAcpiGetRsdt                */
+  { 5, 6, 0x0000B738, 0x0000B7DC, 1 }, /* HalpAcpiCheckAndMapTable (XSDT loop, 6 stack args) */
+  { 5, 7, 0x0000B7B0, 0x0000B7DC, 1 }, /* HalpAcpiCheckAndMapTable (FADT path) */
+};
+
+/* Row 20: the size CopyBiosTable asks HalpAcpiAllocateMemory for (r1 =
+   table header Length + 16): shows whether the HAL read a sane length. */
+#define HAL_ROW_ALLOC_SIZE 20
+
+/* movs r0,#Id ; movw/movt r1,#borrow VA ; nop  (12 bytes, position-free:
+   for stubs in the payload, which is not inside the kernel image) */
+STATIC
+VOID
+StubArgs (
+  UINT8   *At,
+  UINT32  Id
+  )
+{
+  ((UINT16 *)At)[0] = (UINT16)(0x2000 | (Id & 0xFF));
+  ThumbMovwt (At + 2, 1, (UINT16)mStubBorrowVa, FALSE);
+  ThumbMovwt (At + 6, 1, (UINT16)(mStubBorrowVa >> 16), TRUE);
+  ((UINT16 *)At)[5] = 0xBF00;
+}
+
+/*
+  As HalBracketStub, for a callee with stack arguments (128 bytes): the
+  plain stub's 32-byte push would hand the callee its saved registers as
+  arguments 5+ (v13 in the emulator: HalpAcpiGetTableFromBios stored its
+  result through the saved r0 = LoaderBlock -> bugcheck 0x100).  Copies the
+  caller's 6 stack words below the push before the call.
+*/
+STATIC
+UINT8 *
+HalBracketStubStack (
+  UINT8   *Stub,
+  UINT32  Hi,
+  UINT32  Lo,
+  UINT32  RowEnter,
+  UINT32  RowReturn,
+  UINT32  Target
+  )
+{
+  UINT16  *H = (UINT16 *)Stub;
+  UINTN   i;
+
+  H[0] = 0xE92D; H[1] = 0x407F;                            /* push.w {r0-r6, lr}  */
+  H[2] = (UINT16)(0x2400 | Hi); H[3] = (UINT16)(0x2500 | Lo); H[4] = 0x0222; H[5] = 0x432A;
+  StubArgs (Stub + 12, 0x80 | RowEnter);
+  ThumbBranch (Stub + 24, mStubMark, TRUE);
+  H[14] = 0xB086;                                          /* sub sp, #24         */
+  for (i = 0; i < 6; i++) {                                /* +30: 6 x 8 bytes    */
+    H[15 + 4 * i] = 0xF8DD; H[16 + 4 * i] = (UINT16)(0xC000 | (56 + 4 * i));   /* ldr.w r12, [sp, #56+4i] */
+    H[17 + 4 * i] = 0xF8CD; H[18 + 4 * i] = (UINT16)(0xC000 | (4 * i));        /* str.w r12, [sp, #4i]    */
+  }
+  H[39] = 0xF10D; H[40] = 0x0C18;                          /* +78 add.w r12, sp, #24 */
+  H[41] = 0xE89C; H[42] = 0x000F;                          /* +82 ldm.w r12, {r0-r3} */
+  ThumbMovwt (Stub + 86, 12, (UINT16)Target, FALSE);
+  ThumbMovwt (Stub + 90, 12, (UINT16)(Target >> 16), TRUE);
+  H[47] = 0x47E0;                                          /* +94 blx r12          */
+  H[48] = 0xB006;                                          /* +96 add sp, #24      */
+  H[49] = 0x4606; H[50] = 0x0222; H[51] = 0x432A;          /* +98 mov r6, r0 ; value */
+  StubArgs (Stub + 104, 0x80 | RowReturn);
+  ThumbBranch (Stub + 116, mStubMark, TRUE);
+  H[60] = 0x4630; H[61] = 0xB004; H[62] = 0xBD70; H[63] = 0xBF00;
+  return Stub + 128;
+}
+
+STATIC
+UINT8 *
+HalBracketStub (
+  UINT8   *Stub,
+  UINT32  Hi,
+  UINT32  Lo,
+  UINT32  RowEnter,
+  UINT32  RowReturn,
+  UINT32  Target
+  )
+{
+  UINT16  *H = (UINT16 *)Stub;
+
+  /* as the callback stub, with r4 = Hi, r5 = Lo: value = Hi << 8 | Lo */
+  H[0] = 0xE92D; H[1] = 0x407F;
+  H[2] = (UINT16)(0x2400 | Hi); H[3] = (UINT16)(0x2500 | Lo); H[4] = 0x0222; H[5] = 0x432A;
+  StubArgs (Stub + 12, 0x80 | RowEnter);
+  ThumbBranch (Stub + 24, mStubMark, TRUE);
+  H[14] = 0xE89D; H[15] = 0x000F;
+  ThumbMovwt (Stub + 32, 12, (UINT16)Target, FALSE);
+  ThumbMovwt (Stub + 36, 12, (UINT16)(Target >> 16), TRUE);
+  H[20] = 0x47E0;
+  H[21] = 0x4606; H[22] = 0x0222; H[23] = 0x432A;
+  StubArgs (Stub + 48, 0x80 | RowReturn);
+  ThumbBranch (Stub + 60, mStubMark, TRUE);
+  H[32] = 0x4630; H[33] = 0xB004; H[34] = 0xBD70; H[35] = 0xBF00;
+  return Stub + 72;
+}
+
+/*
+  HAL TLB fix (real Scorpion, beacons v8/v9): HalpUnmapVirtualAddress clears
+  the PTEs and then does TLBIALL; BPIALL; DSB; ISB - no DSB between the PTE
+  stores and the TLB invalidate, which ARMv7 requires.  The Scorpion can walk
+  the old PTE again right after the invalidate and keep a stale translation;
+  HalpMap writes new PTEs without any invalidate, so the next mapping at the
+  same VA (map header / unmap / map whole table in the ACPI code) reads the
+  old physical page and the HAL hangs.  QEMU's TLB is exact, so the emulator
+  never showed it; every beacon stub's TLBIALL hid it.
+  Both sequences are redirected to a stub: DSB; TLBIALL; BPIALL; DSB; ISB.
+*/
+typedef struct {
+  UINT32  Rva;        /* hal RVA of the sequence           */
+  UINT32  Back;       /* hal RVA to continue at            */
+  UINT8   Bytes[16];  /* original bytes (checked)          */
+  UINT32  Length;
+} HAL_TLB_FIX;
+
+STATIC CONST HAL_TLB_FIX  mHalTlbFix[] = {
+  /* HalpUnmapVirtualAddress: mcr TLBIALL(r3) ; mcr BPIALL(r3) ; dsb ; isb */
+  { 0x0000BA94, 0x0000BAA4, { 0x08, 0xEE, 0x17, 0x3F, 0x07, 0xEE, 0xD5, 0x3F,
+                              0xBF, 0xF3, 0x4F, 0x8F, 0xBF, 0xF3, 0x6F, 0x8F }, 16 },
+  /* HalpMap after the PTE store: dsb ; isb */
+  { 0x0000B9F2, 0x0000B9FA, { 0xBF, 0xF3, 0x4F, 0x8F, 0xBF, 0xF3, 0x6F, 0x8F }, 8 },
+};
+
+STATIC
+VOID
+ThumbBranchVa (
+  UINT8   *At,
+  UINT32  AtVa,
+  UINT32  TargetVa
+  )
+{
+  ThumbBranch (At, At + (INT32)((TargetVa & ~1u) - AtVa), FALSE);
+}
+
+STATIC
+UINT8 *
+InstallHalTlbFix (
+  UINT8   *Hal,
+  UINT32  HalRuntime,
+  UINT32  NtRuntime,
+  UINT8   *Stub
+  )
+{
+  STATIC CONST UINT16  Seq[] = {
+    0xF3BF, 0x8F4F,           /* dsb sy                */
+    0xEE08, 0x3F17,           /* mcr p15,0,r3,c8,c7,0  TLBIALL (Rt ignored) */
+    0xEE07, 0x3FD5,           /* mcr p15,0,r3,c7,c5,6  BPIALL  */
+    0xF3BF, 0x8F4F,           /* dsb sy                */
+    0xF3BF, 0x8F6F,           /* isb sy                */
+  };
+  UINTN  Index, Done = 0;
+
+  for (Index = 0; Index < ARRAY_SIZE (mHalTlbFix); Index++) {
+    UINT8   *Site  = Hal + mHalTlbFix[Index].Rva;
+    UINT32  StubVa = NtRuntime + (UINT32)(Stub - mBeaconKernel);
+
+    if (CompareMem (Site, mHalTlbFix[Index].Bytes, mHalTlbFix[Index].Length) != 0) {
+      DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL TLB fix: hal+%x does not match, skipped\n", mHalTlbFix[Index].Rva));
+      continue;
+    }
+    CopyMem (Stub, Seq, sizeof (Seq));
+    ThumbBranchVa (Stub + sizeof (Seq), StubVa + sizeof (Seq), HalRuntime + mHalTlbFix[Index].Back);
+    ThumbBranchVa (Site, HalRuntime + mHalTlbFix[Index].Rva, StubVa);
+    WriteBackInvalidateDataCacheRange (Site, 4);
+    InvalidateInstructionCacheRange (Site, 4);
+    WriteBackInvalidateDataCacheRange (Stub, sizeof (Seq) + 4);
+    InvalidateInstructionCacheRange (Stub, sizeof (Seq) + 4);
+    Stub += (sizeof (Seq) + 4 + 7) & ~7u;
+    Done++;
+  }
+  DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL TLB fix: %u of %u sequences\n", Done, ARRAY_SIZE (mHalTlbFix)));
+  return Stub;
+}
+
+STATIC
+VOID
+InstallHalBeacon (
+  UINT8  *Hal
+  )
+{
+  UINT32  NtDelta, HalDelta, NtRuntime, PayloadVa, *Table;
+  UINTN   Index;
+  UINT8   *Stub, *CaveEnd;
+  UINT8   *Payload = (UINT8 *)(UINTN)KEP_PAYLOAD_PHYS;
+
+  if ((mBeaconKernel == NULL) || (mBeaconNextStub == NULL)) {
+    DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: no ntoskrnl beacon\n"));
+    return;
+  }
+  NtDelta   = ReadUnaligned32 ((UINT32 *)(mBeaconKernel + NT_SELFPTR_RVA)) - NT_SELFPTR_LINK;
+  NtRuntime = NT_LINK_BASE + NtDelta;
+  PayloadVa = NtRuntime + KEP_PAYLOAD_RVA;
+  Table     = (UINT32 *)(Hal + HAL_TABLE_RVA);
+  HalDelta  = Table[0] - 0x8003B229;                       /* entry 0's link-time value */
+  if (((NtDelta & 0xFFF) != 0) || ((HalDelta & 0xFFF) != 0)) {
+    DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: odd deltas nt %x hal %x, skipped\n", NtDelta, HalDelta));
+    return;
+  }
+
+  /*
+    stub (72 bytes) per callback n, original target T:
+      +0  push.w {r0-r6, lr}
+      +4  mov r4, r0 ; movs r5, #n ; lsls r2, r4, #8 ; orrs r2, r5
+      +12 r0 = 0x80 | 8, r1 = borrow VA ; +24 bl BeaconMark
+      +28 ldm.w sp, {r0-r3}
+      +32 movw/movt r12, T ; +40 blx r12
+      +42 mov r6, r0 ; lsls r2, r4, #8 ; orrs r2, r5
+      +48 r0 = 0x80 | 9, r1 = borrow VA ; +60 bl BeaconMark
+      +64 mov r0, r6 ; add sp, #16 ; pop {r4-r6, pc}
+  */
+  Stub = (UINT8 *)(((UINTN)mBeaconNextStub + 7) & ~(UINTN)7);
+  Stub = InstallHalTlbFix (Hal, HAL_LINK_BASE + HalDelta, NtRuntime, Stub);
+  CaveEnd = Stub;
+  WriteBackInvalidateDataCacheRange (mBeaconNextStub, (UINTN)(CaveEnd - mBeaconNextStub));
+  InvalidateInstructionCacheRange (mBeaconNextStub, (UINTN)(CaveEnd - mBeaconNextStub));
+  if (CaveEnd > mBeaconKernel + BEACON_CAVE_END_RVA) {
+    DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: CAVE OVERFLOW: ends at +%x, limit +%x\n",
+            (UINT32)(CaveEnd - mBeaconKernel), BEACON_CAVE_END_RVA));
+  }
+  if (!mPayloadMapped) {
+    DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: payload not mapped, trace skipped\n"));
+    return;
+  }
+
+  /* the trace stubs go to the payload: written at its physical address, run
+     at PayloadVa; every reference in them is absolute or payload-relative */
+  ZeroMem (Payload, KEP_PAYLOAD_PAGES * EFI_PAGE_SIZE);
+  CopyMem (Payload, mBeaconMark, sizeof (mBeaconMark));
+  mStubMark     = Payload;
+  mStubBorrowVa = NtRuntime + BEACON_BORROW_RVA;
+  Stub = Payload + ((sizeof (mBeaconMark) + 7) & ~7u);
+  for (Index = 0; HAL_TRACE && (Index < HAL_TABLE_ENTRIES); Index++) {
+    UINT32  T = Table[2 * Index];
+    UINT16  *H = (UINT16 *)Stub;
+
+    if (((T & 1) == 0) || (Index != 1)) {
+      continue;    /* not a Thumb pointer / only HalpDbgInitSystem (v6 result) */
+    }
+    H[0] = 0xE92D; H[1] = 0x407F;
+    H[2] = 0x4604; H[3] = (UINT16)(0x2500 | Index); H[4] = 0x0222; H[5] = 0x432A;
+    StubArgs (Stub + 12, 0x80 | HAL_ROW_ENTER);
+    ThumbBranch (Stub + 24, mStubMark, TRUE);
+    H[14] = 0xE89D; H[15] = 0x000F;
+    ThumbMovwt (Stub + 32, 12, (UINT16)T, FALSE);
+    ThumbMovwt (Stub + 36, 12, (UINT16)(T >> 16), TRUE);
+    H[20] = 0x47E0;
+    H[21] = 0x4606; H[22] = 0x0222; H[23] = 0x432A;
+    StubArgs (Stub + 48, 0x80 | HAL_ROW_RETURN);
+    ThumbBranch (Stub + 60, mStubMark, TRUE);
+    H[32] = 0x4630; H[33] = 0xB004; H[34] = 0xBD70; H[35] = 0xBF00;
+    Table[2 * Index] = PayloadVa + (UINT32)(Stub - Payload) + 1;
+    Stub += 72;
+  }
+  for (Index = 0; HAL_TRACE && (Index < ARRAY_SIZE (mHalBlHooks)); Index++) {
+    UINT8   *Site   = Hal + mHalBlHooks[Index].Site;
+    UINT32  SiteVa  = HAL_LINK_BASE + HalDelta + mHalBlHooks[Index].Site;
+    UINT32  StubVa  = PayloadVa + (UINT32)(Stub - Payload);
+
+    if (ThumbBlTarget (Site) != Hal + mHalBlHooks[Index].Target) {
+      DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: no BL at hal+%x, skipped\n", mHalBlHooks[Index].Site));
+      continue;
+    }
+    if ((mHalBlHooks[Index].Level == 5) && (mHalBlHooks[Index].Id == 1)) {
+      /*
+        paint r1 on row 20, then fall into the bracket stub right after:
+          push.w {r0-r6, lr} ; mov r2, r1 ; r0/r1 = row/borrow ; bl Mark ;
+          pop.w {r0-r6, lr}   (24 bytes, the bracket stub follows)
+      */
+      UINT16  *H = (UINT16 *)Stub;
+
+      H[0] = 0xE92D; H[1] = 0x407F;
+      H[2] = 0x460A;                                       /* mov r2, r1 */
+      StubArgs (Stub + 6, 0x80 | HAL_ROW_ALLOC_SIZE);
+      ThumbBranch (Stub + 18, mStubMark, TRUE);
+      H[11] = 0xE8BD; H[12] = 0x407F;                      /* pop.w {r0-r6, lr} */
+      H[13] = 0xBF00;
+      Stub += 28;                                          /* falls through into the bracket stub */
+    }
+    Stub = (mHalBlHooks[Index].StackArgs ? HalBracketStubStack : HalBracketStub) (
+                           Stub, (UINT32)mHalBlHooks[Index].Level << 4, mHalBlHooks[Index].Id,
+                           HAL_ROW_SUB_ENTER + 2 * (mHalBlHooks[Index].Level - 1u),
+                           HAL_ROW_SUB_RETURN + 2 * (mHalBlHooks[Index].Level - 1u),
+                           HAL_LINK_BASE + HalDelta + mHalBlHooks[Index].Target + 1);
+    if ((INT32)(StubVa - SiteVa) >= 0x1000000 || (INT32)(StubVa - SiteVa) < -0x1000000) {
+      DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: hal+%x -> %x out of BL range, skipped\n",
+              mHalBlHooks[Index].Site, StubVa));
+      continue;
+    }
+    ThumbBlVa (Site, SiteVa, StubVa);
+    WriteBackInvalidateDataCacheRange (Site, 4);
+    InvalidateInstructionCacheRange (Site, 4);
+  }
+  if (Stub > Payload + KEP_PAYLOAD_PAGES * EFI_PAGE_SIZE) {
+    DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: PAYLOAD OVERFLOW: %x bytes\n", (UINT32)(Stub - Payload)));
+  }
+  WriteBackInvalidateDataCacheRange (Payload, KEP_PAYLOAD_PAGES * EFI_PAGE_SIZE);
+  InvalidateInstructionCacheRange (Payload, KEP_PAYLOAD_PAGES * EFI_PAGE_SIZE);
+  WriteBackInvalidateDataCacheRange (Table, HAL_TABLE_ENTRIES * 8);
+  DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: hal at %p, nt runtime %x, %u BL hooks, cave end +%x, payload %x bytes at %x\n",
+          Hal, NtRuntime, ARRAY_SIZE (mHalBlHooks), (UINT32)(CaveEnd - (mBeaconKernel + BEACON_CAVE_RVA)),
+          (UINT32)(Stub - Payload), PayloadVa));
 }
 
 /* ------------------------------------------------------------------ */
@@ -625,6 +1155,24 @@ ExitBootServicesHook (
     }
 
     DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: %u patches applied\n", TotalPatched));
+#if BEACON_ENABLE
+    if (!EFI_ERROR (Status)) {
+      UINT8  *Hal = NULL;
+
+      Desc = (EFI_MEMORY_DESCRIPTOR *)gMemMap;
+      for (e = 0; (e < Entries) && (Hal == NULL); e++) {
+        if (((Desc->Type == EfiLoaderData) || (Desc->Type == EfiLoaderCode)) && (Desc->NumberOfPages > 1)) {
+          Hal = FindHal ((UINT8 *)(UINTN)Desc->PhysicalStart, EFI_PAGES_TO_SIZE ((UINTN)Desc->NumberOfPages));
+        }
+        Desc = NEXT_MEMORY_DESCRIPTOR (Desc, DescSize);
+      }
+      if (Hal != NULL) {
+        InstallHalBeacon (Hal);
+      } else {
+        DEBUG ((DEBUG_ERROR, "KernelErrataPatcher: HAL beacon: hal.dll not found\n"));
+      }
+    }
+#endif
   }
 
   RestoreExitBootServices ();
