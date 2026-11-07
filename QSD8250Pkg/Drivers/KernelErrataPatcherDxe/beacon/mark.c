@@ -177,7 +177,12 @@ static u32 nmrr_write_through(void)
     return old;
 }
 
-void BeaconMapPayload(u32 va, u32 phys, u32 pages)
+/* flags (r3, set by the KEP's mapper stub) */
+#define MAP_TTBR_SHARED  1u     /* TTBR0.S = 1 (no visible effect on the HD2) */
+#define MAP_NMRR_WT      2u     /* write-back Normal memory -> write-through (REQUIRED on the HD2) */
+#define MAP_DIAG_ROWS    4u     /* paint SCTLR / PRRR / old NMRR on rows 20-22 */
+
+void BeaconMapPayload(u32 va, u32 phys, u32 pages, u32 flags)
 {
     u32 cpsr, sp, attr, k;
 
@@ -192,7 +197,7 @@ void BeaconMapPayload(u32 va, u32 phys, u32 pages)
        are walked stale -> silent fault loops (beacons v6..v16).  Set S (bit
        1) -> 0x0B before the HAL runs; KiSetFeatureBits copies TTBR0 & 0x7F
        into every later page directory base. */
-    {
+    if (flags & MAP_TTBR_SHARED) {
         u32 t;
         __asm__ volatile("mrc p15, 0, %0, c2, c0, 0" : "=r"(t));
         if (!(t & 2u)) {
@@ -223,12 +228,17 @@ void BeaconMapPayload(u32 va, u32 phys, u32 pages)
 
     {
         u32 sctlr, prrr, nmrr_old, borrow = va - 0x10000u;   /* PAGEVRFY base */
-        nmrr_old = nmrr_write_through();
-        __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
-        __asm__ volatile("mrc p15, 0, %0, c10, c2, 0" : "=r"(prrr));
-        mark(0x80u | 20u, borrow, sctlr);   /* rows 20-22: what Windows runs with */
-        mark(0x80u | 21u, borrow, prrr);
-        mark(0x80u | 22u, borrow, nmrr_old);
+        if (flags & MAP_NMRR_WT)
+            nmrr_old = nmrr_write_through();
+        else
+            __asm__ volatile("mrc p15, 0, %0, c10, c2, 1" : "=r"(nmrr_old));
+        if (flags & MAP_DIAG_ROWS) {
+            __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+            __asm__ volatile("mrc p15, 0, %0, c10, c2, 0" : "=r"(prrr));
+            mark(0x80u | 20u, borrow, sctlr);   /* rows 20-22: what Windows runs with */
+            mark(0x80u | 21u, borrow, prrr);
+            mark(0x80u | 22u, borrow, nmrr_old);
+        }
     }
 out:
     if (!(cpsr & 0x80u))
