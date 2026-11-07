@@ -22,7 +22,14 @@
   with the MMFR3 check gone Windows never cleans its PTEs.  The HAL's mapper
   (HalpMap / HalpUnmapVirtualAddress) is therefore redirected to stubs that
   clean the written PTEs to PoC before TLBIALL (real HD2, beacon v18: the
-  silent hang in HAL init is gone).  Mm's own PTE writes are not covered yet.
+  silent hang in HAL init is gone).  For everything else (Mm) the payload
+  mapper, run at the first kernel milestone, turns all write-back Normal
+  memory write-through (NMRR, KEP_NMRR_WT): PTE stores reach memory, where
+  the walker reads.  With that the real HD2 boots to the spinner.
+
+  Debug aids (panel "barcodes": bugcheck rows always, milestone stripes /
+  HAL call trace / register rows behind switches) and the photo decoder:
+  beacon/README.md, beacon/decode_beacon.py.
 
   Copyright (c) 2024, J0SH1X. All rights reserved.
   SPDX-License-Identifier: BSD-2-Clause-Patent
