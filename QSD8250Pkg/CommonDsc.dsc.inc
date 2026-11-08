@@ -253,6 +253,8 @@
   MemoryAllocationLib|MdePkg/Library/UefiMemoryAllocationLib/UefiMemoryAllocationLib.inf
   ReportStatusCodeLib|MdeModulePkg/Library/RuntimeDxeReportStatusCodeLib/RuntimeDxeReportStatusCodeLib.inf
   CapsuleLib|MdeModulePkg/Library/DxeCapsuleLibFmp/DxeRuntimeCapsuleLib.inf
+  # runtime-safe reset (OS restart / shut down through ResetSystemRuntimeDxe)
+  ResetSystemLib|QSD8250Pkg/Library/PlatformResetRuntimeLib/PlatformResetRuntimeLib.inf
 !ifndef CONFIG_NO_DEBUGLIB
   DebugLib|MdeModulePkg/Library/PeiDxeDebugLibReportStatusCode/PeiDxeDebugLibReportStatusCode.inf
 !endif
@@ -578,6 +580,8 @@
   # Windows RT kernel errata patcher (bypass 0x5D UNSUPPORTED_PROCESSOR)
   #
   QSD8250Pkg/Drivers/KernelErrataPatcherDxe/KernelErrataPatcherDxe.inf
+  QSD8250Pkg/Drivers/UsbFnDxe/UsbFnDxe.inf
+  QSD8250Pkg/Drivers/UsbLogDxe/UsbLogDxe.inf
 
   #
   # Bds

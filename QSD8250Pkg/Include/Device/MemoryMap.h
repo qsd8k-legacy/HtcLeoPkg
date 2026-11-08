@@ -73,7 +73,14 @@ static ARM_MEMORY_REGION_DESCRIPTOR_EX gDeviceMemoryDescriptorEx[] = {
 {0x02B77000, 0x01489000, "HLOS 2",           AddMem, SYS_MEM, SYS_MEM_CAP, BsCode, WRITE_BACK},
 
 {0x10000000, 0x01800000, "QDSP6",            AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, DEVICE},
-{0x11800000, 0x1B400000, "HLOS 3",           AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK},
+{0x11800000, 0x1B200000, "HLOS 3",           AddMem, SYS_MEM, SYS_MEM_CAP, Conv,   WRITE_BACK},
+// OS log ring (HtcLeoWinDrivers common/oslog.h, OS_LOG_BASE): Windows drivers
+// append to it, msmusbfn / usbdbg.py read it.  Never cleared by UEFI, so it
+// survives a warm reset.  Off the top of HLOS 3, under the boot log ring.
+{0x2CA00000, 0x00100000, "OS Log",           AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK},
+// Boot log ring (LogRing.h, LOG_RING_BASE): every DEBUG() byte, shipped over
+// USB by UsbLogDxe.  Right below the KEP payload, off the top of HLOS 3.
+{0x2CB00000, 0x00100000, "Log Ring",         AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK},
 // KernelErrataPatcherDxe debug payload (KEP_PAYLOAD_PHYS): top of HLOS 3 so the
 // conventional range stays contiguous; Reserved, so Windows never uses it.
 {0x2CC00000, 0x00100000, "KEP Debug Payload", AddMem, SYS_MEM, SYS_MEM_CAP, Reserv, WRITE_BACK},

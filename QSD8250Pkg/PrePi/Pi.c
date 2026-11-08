@@ -13,6 +13,7 @@
 #include <Library/ArmLib.h>
 #include <Library/BaseMemoryLib.h>
 #include <Library/CacheMaintenanceLib.h>
+#include <LogRing.h>
 #include <Library/DebugAgentLib.h>
 #include <Library/DebugLib.h>
 #include <Library/HobLib.h>
@@ -78,6 +79,9 @@ VOID Main(IN VOID *StackBase, IN UINTN StackSize)
   UINTN MemorySize     = 0;
   UINTN UefiMemoryBase = 0;
   UINTN UefiMemorySize = 0;
+
+  // empty boot log for UsbLogDxe: every DEBUG() byte from here on lands in it
+  LogRingReset ();
 
   // Architecture-specific initialization
   // Enable Floating Point

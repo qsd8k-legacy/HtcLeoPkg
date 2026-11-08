@@ -1,0 +1,44 @@
+#
+#  Stream the boot log ring to a USB host over EFI_USBFN_IO_PROTOCOL
+#  (vendor device 1209:0001, bulk IN 0x81).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = UsbLogDxe
+  FILE_GUID      = 7d2e4a91-1b5c-4f3e-8a6d-0c9b2e7f4a13
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 1.0
+
+  ENTRY_POINT    = UsbLogDxeInitialize
+
+[Sources.common]
+  UsbLogDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  QSD8250Pkg/QSD8250Pkg.dec
+
+[LibraryClasses]
+  BaseLib
+  BaseMemoryLib
+  DebugLib
+  DevicePathLib
+  MemoryAllocationLib
+  PrintLib
+  IoLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiUsbFunctionIoProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+
+[Guids]
+  gEfiFileInfoGuid
+
+[Depex]
+  gEfiUsbFunctionIoProtocolGuid

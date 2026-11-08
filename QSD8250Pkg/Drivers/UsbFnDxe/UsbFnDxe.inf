@@ -1,0 +1,47 @@
+#
+#  EFI_USBFN_IO_PROTOCOL for the QSD8250 (HTC HD2) HS-USB controller
+#  (ChipIdea "msm72k"), interrupt driven (VIC INT_USB_HS).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = UsbFnDxe
+  FILE_GUID      = 2f8b1d6e-7a4c-4b1d-9e0a-5c3d7f6a1b28
+  MODULE_TYPE    = DXE_DRIVER
+  VERSION_STRING = 1.0
+  ENTRY_POINT    = UsbFnDxeInitialize
+
+[Sources.common]
+  UsbFnDxe.h
+  UsbFnDxe.c
+  ChipIdea.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  EmbeddedPkg/EmbeddedPkg.dec
+  ArmPkg/ArmPkg.dec
+  QSD8250Pkg/QSD8250Pkg.dec
+
+[LibraryClasses]
+  ArmLib
+  BaseLib
+  BaseMemoryLib
+  CacheMaintenanceLib
+  DebugLib
+  DxeServicesTableLib
+  IoLib
+  MemoryAllocationLib
+  MsmPcomLib
+  TimerLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEfiUsbFunctionIoProtocolGuid
+  gHardwareInterruptProtocolGuid
+  gEfiCpuArchProtocolGuid
+
+[Depex]
+  gHardwareInterruptProtocolGuid AND gEfiCpuArchProtocolGuid

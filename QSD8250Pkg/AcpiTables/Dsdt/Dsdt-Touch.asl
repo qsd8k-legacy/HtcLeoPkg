@@ -7,8 +7,8 @@
         Name (_HID, "HTCL0003")
         Name (_UID, 1)
         Method (_STA) { Return (0xF) }
-        // data-ready: TLMM GPIO group 1 -> SIRC 9 -> GSI 96 + 9 (halextqcvic)
-        Name (_CRS, ResourceTemplate () {
-            Interrupt (ResourceConsumer, Level, ActiveHigh, Exclusive) { 105 }
-        })
+        // No _CRS: with Interrupt (..) { 105 } (TLMM GPIO group 1 -> SIRC 9 ->
+        // GSI 96 + 9, halextqcvic) Windows never starts the device - the
+        // stack gets FILTER_RESOURCE_REQUIREMENTS but no START (2026-11-08).
+        // htcleots then polls the data-ready line on a timer.
     }

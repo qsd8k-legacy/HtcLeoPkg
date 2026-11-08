@@ -1,0 +1,37 @@
+#
+#  ResetSystemLib for the HTC HD2 (QSD8250), runtime-safe: proc_comm
+#  PCOM_RESET_CHIP / PCOM_POWER_DOWN through runtime-mapped SMEM and CSR
+#  pages.  Only for DXE_RUNTIME_DRIVER (ResetSystemRuntimeDxe).
+#
+#  SPDX-License-Identifier: BSD-2-Clause-Patent
+#
+
+[Defines]
+  INF_VERSION    = 0x00010005
+  BASE_NAME      = PlatformResetRuntimeLib
+  FILE_GUID      = 6d1f2c84-5b37-4e0a-9c41-2a8e7f03b5d6
+  MODULE_TYPE    = DXE_RUNTIME_DRIVER
+  VERSION_STRING = 1.0
+  LIBRARY_CLASS  = ResetSystemLib|DXE_RUNTIME_DRIVER
+  CONSTRUCTOR    = PlatformResetRuntimeLibConstructor
+
+[Sources.common]
+  PlatformResetRuntimeLib.c
+
+[Packages]
+  ArmPkg/ArmPkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  MdePkg/MdePkg.dec
+  QSD8250Pkg/QSD8250Pkg.dec
+
+[LibraryClasses]
+  ArmLib
+  BaseLib
+  DebugLib
+  DxeServicesTableLib
+  IoLib
+  UefiBootServicesTableLib
+  UefiRuntimeLib
+
+[Guids]
+  gEfiEventVirtualAddressChangeGuid

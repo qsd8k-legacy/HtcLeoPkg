@@ -12,6 +12,7 @@
 #include <Library/BaseLib.h>
 #include <Library/IoLib.h>
 #include <Library/SerialPortLib.h>
+#include <LogRing.h>
 #include <Library/MsmSerialPortLib.h>
 
 /**
@@ -57,6 +58,8 @@ SerialPortWrite (
   )
 {
   UINTN BytesSent = 0;
+
+  LogRingAppend (Buffer, NumberOfBytes);
   while (BytesSent < NumberOfBytes) {
   while (!(MmioRead32((UINTN)MSM_UART1_PHYS + UART_SR) & UART_SR_TX_READY))
 		;

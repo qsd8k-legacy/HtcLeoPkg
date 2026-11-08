@@ -4,6 +4,7 @@
 #include <Library/CacheMaintenanceLib.h>
 #include <Library/HobLib.h>
 #include <Library/SerialPortLib.h>
+#include <LogRing.h>
 
 #include <Resources/font5x12.h>
 #include <Resources/FbColor.h>
@@ -361,6 +362,7 @@ SerialPortWrite
 	UINTN  InterruptState = ArmGetInterruptState();
 	ArmDisableInterrupts();
 
+	LogRingAppend (Buffer, NumberOfBytes);
 	while (Buffer < Final)
 	{
 		FbConPutCharWithFactor(*Buffer++, FBCON_COMMON_MSG, SCALE_FACTOR);
